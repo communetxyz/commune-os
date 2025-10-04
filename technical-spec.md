@@ -26,13 +26,13 @@ The core challenge of commune living is establishing trust between strangers who
 - Enable transparent chore scheduling and expense assignment
 - Create invite-only communes with optional collateralization
 - Track task completions and expense payments through mappings
-- Enable voting-based expense assignment and dispute resolution
+- Enable direct expense assignment with dispute resolution
 - Maintain minimal on-chain state for gas efficiency on Gnosis Chain
 
 **Smart Contract Functionality:**
 - Invite-only member registration with optional collateral deposit
 - Chore schedule definition with timestamp-based recurrence
-- Expense creation and assignment via voting
+- Expense creation and direct assignment to members
 - Collateral management and slashing mechanism
 - View functions to calculate current chores from schedule
 - Simple completion mapping (choreId => member => timestamp)
@@ -60,7 +60,7 @@ The core challenge of commune living is establishing trust between strangers who
 | Invite-only access | Secure commune membership | Requires signature verification |
 | View-based chores | No storage for individual chore instances | Computation on each query |
 | Optional collateralization | Enables expense enforcement | Requires xDAI deposit |
-| Voting-based assignment | Democratic expense allocation | Requires member participation |
+| Direct expense assignment | Fast allocation without voting | Creator decides assignments |
 
 ### Alternative Smart Contract Approaches
 
@@ -95,17 +95,16 @@ The core challenge of commune living is establishing trust between strangers who
 6. **Post-condition**: Member registered with collateral deposited if required
 
 **Expense Assignment and Payment Flow:**
-1. **Pre-condition**: Expense created by commune member
-2. **Proposal**: Member proposes assignment via proposeExpenseAssignment()
-3. **Voting Period**: Members vote on proposed assignment
-4. **Assignment**: If vote passes, expense assigned to member
-5. **Payment**: Assigned member pays off-chain, calls markExpensePaid()
-6. **Dispute Window**: Other members can dispute if payment not made
-7. **Dispute Proposal**: disputeExpensePayment(expenseId, newAssigneeAddress)
-8. **Dispute Vote**: Members vote on BOTH dispute validity AND new assignee
-9. **Slashing**: If dispute upheld, slash collateral up to expense amount
-10. **Direct Transfer**: Slashed funds immediately sent to approved new assignee
-11. **Post-condition**: New assignee must fulfill expense with received funds
+1. **Pre-condition**: Commune member wants to create an expense
+2. **Direct Assignment**: Member calls createExpense(amount, description, dueDate, assignedTo)
+3. **State Update**: Expense created and assigned to specified member immediately
+4. **Payment**: Assigned member pays off-chain, calls markExpensePaid()
+5. **Dispute Option**: ANY member can dispute ANY expense at ANY time (paid or unpaid)
+6. **Dispute Proposal**: disputeExpense(expenseId, newAssigneeAddress)
+7. **Dispute Vote**: Members vote on BOTH dispute validity AND new assignee
+8. **Slashing**: If dispute upheld, slash collateral up to expense amount
+9. **Direct Transfer**: Slashed funds immediately sent to approved new assignee
+10. **Post-condition**: New assignee must fulfill expense with received funds
 
 **Chore Completion Flow (No Instance Storage):**
 1. **Pre-condition**: ChoreSchedules initialized at commune creation
@@ -128,6 +127,7 @@ The core challenge of commune living is establishing trust between strangers who
 | A5 | Member not in commune | Reject action | Require valid membership |
 | A6 | Expense dispute upheld | Slash and transfer | Funds go to voter-approved new assignee |
 | A7 | Collateral insufficient for expense | Partial slash only | Slash maximum available |
+| A8 | Dispute on paid expense | Process dispute vote | Can dispute any expense anytime |
 
 ## 5. UML Diagrams
 
@@ -169,18 +169,15 @@ classDiagram
         +mapping(uint256=>Expense) expenses
         +mapping(expenseId=>address) expenseAssignments
         +mapping(expenseId=>member=>bool) expensePayments
-        +createExpense(amount, description, dueDate)
-        +proposeExpenseAssignment(expenseId, member)
-        +disputeExpensePayment(expenseId, newAssignee)
+        +createExpense(amount, description, dueDate, assignedTo)
+        +disputeExpense(expenseId, newAssignee)
         +markExpensePaid(expenseId)
         +isExpensePaid(expenseId, member) view
         +getExpenseStatus(expenseId) view
     }
     
     class VotingModule {
-        +mapping(expenseId=>mapping(voter=>bool)) expenseVotes
         +mapping(disputeId=>mapping(voter=>bool)) disputeVotes
-        +voteOnAssignment(expenseId, support)
         +voteOnDispute(disputeId, support)
         +tallyVotes(voteId) view
     }
@@ -317,27 +314,16 @@ sequenceDiagram
     participant MemberA
     participant MemberB
     participant Contract
-    
-    MemberA->>Contract: createExpense(amount, description, dueDate)
-    Contract->>Contract: Store expense
-    Contract-->>MemberA: ExpenseId returned
-    
-    MemberA->>Contract: proposeExpenseAssignment(expenseId, MemberB)
-    Contract->>Contract: Start voting period
-    Contract-->>MemberA: Proposal created
-    
-    loop Voting Period
-        MemberA->>Contract: voteOnAssignment(expenseId, true)
-        Contract->>Contract: Record vote
-    end
-    
-    Contract->>Contract: Tally votes
-    Contract->>Contract: Assign to MemberB
-    Contract-->>MemberB: Expense assigned
-    
+
+    MemberA->>Contract: createExpense(amount, description, dueDate, assignedTo: MemberB)
+    Contract->>Contract: Store expense with assignment
+    Contract-->>MemberB: Expense assigned directly
+
     MemberB->>MemberB: Pay expense off-chain
     MemberB->>Contract: markExpensePaid(expenseId)
     Contract-->>MemberB: Expense marked paid
+
+    Note over Contract: ANY member can dispute ANY expense at ANY time
 ```
 
 ### Sequence Diagram - Expense Dispute & Slashing
@@ -347,22 +333,22 @@ sequenceDiagram
     participant AssignedMember
     participant Contract
     participant NewAssignee
-    
-    Note over AssignedMember: Doesn't pay expense
-    
-    Disputer->>Contract: disputeExpensePayment(expenseId, newAssignee)
+
+    Note over Disputer: Can dispute ANY expense (paid or unpaid)
+
+    Disputer->>Contract: disputeExpense(expenseId, newAssignee)
     Note over Contract: Proposal includes who will take over
     Contract->>Contract: Start dispute vote
     Contract-->>Disputer: Dispute initiated
-    
+
     loop Dispute Voting
         Disputer->>Contract: voteOnDispute(expenseId, true)
         Note over Contract: Voting on both dispute AND new assignee
         Contract->>Contract: Record dispute vote
     end
-    
+
     Contract->>Contract: Tally dispute votes
-    
+
     alt Dispute Upheld
         Contract->>Contract: Calculate slash amount
         Contract->>AssignedMember: Slash collateral (up to expense)
@@ -463,15 +449,15 @@ stateDiagram
 - **Expenses**: Array of expense records per commune
 - **ExpenseAssignments**: Mapping of expense ID to assigned member  
 - **ExpensePayments**: Mapping (expenseId => member => paid) in ExpenseManager
-- **ExpenseVotes**: Nested mapping for voting on disputes only
+- **DisputeVotes**: Nested mapping for voting on disputes only
 - **InviteNonces**: Used nonces for invite signatures
 
 ### Smart Contract Modules
 - **CommuneRegistry**: Creates communes with invite links and initial chore schedules, manages commune statistics
 - **MemberRegistry**: Manages member addresses, collateral deposits, and member status views
 - **ChoreScheduler**: Stores chore schedules initialized at commune creation, tracks completions, and calculates current chores
-- **ExpenseManager**: Handles expense lifecycle including creation, assignment, payments, disputes, and status queries
-- **VotingModule**: Manages votes for expense disputes only
+- **ExpenseManager**: Handles expense lifecycle including creation, direct assignment, payments, disputes, and status queries
+- **VotingModule**: Manages votes for disputes only (no voting for assignment)
 - **CollateralManager**: Controls deposits and slashing (no withdrawals)
 
 ## 7. Open Questions
@@ -489,8 +475,8 @@ stateDiagram
 - **xDAI**: Native token of Gnosis Chain, pegged 1:1 to USD
 - **Collateral**: Permanent xDAI deposit required to join communes (non-withdrawable)
 - **Slashing**: Deduction from collateral for unpaid expenses, funds transferred to voter-approved new assignee
-- **Expense Assignment**: Voting process to allocate expense responsibility
-- **Dispute Window**: Period where members can challenge expense payment claims
+- **Expense Assignment**: Direct allocation of expense responsibility to a member
+- **Expense Dispute**: Process where ANY member can challenge ANY expense at ANY time
 - **Nonced Signature**: Cryptographic signature with unique identifier to prevent replay
 - **View Function**: Read-only function that computes data without gas costs
 - **Timestamp-based**: Using Unix timestamps instead of block numbers for timing
